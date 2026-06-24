@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "TexWaller - AI Providers Connection Tool",
+  "version": "0.1.0",
+  "description": "Connect TexWaller to supported AI providers in a simple, guided way.",
+  "permissions": [
+    "clipboardWrite",
+    "offscreen",
+    "storage",
+    "tabs",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "https://auth.openai.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  }
+}
