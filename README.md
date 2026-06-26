@@ -1,66 +1,129 @@
-# OAuth Redirect Clipboard Capture
+# TexWaller AI Connector
 
-Chrome/Chromium MV3 extension that captures a localhost OAuth redirect URL only when the flow was initiated from your configured web app.
+Estensione MV3 che aiuta TexWaller a completare un flusso OAuth con provider AI esterni.
 
-## Security Model
+L'estensione intercetta solo redirect OAuth locali validi, verifica che appartengano a un flusso iniziato da TexWaller e invia l'URL finale alla tab TexWaller originale.
 
-The extension does not copy arbitrary localhost URLs. It only copies a redirect when all checks pass:
+## Funzionamento
 
-1. The OAuth tab was opened by `CONFIG.appOrigin`.
-2. The opened URL uses `CONFIG.authOrigin`.
-3. The auth URL contains an OAuth `state` value.
-4. The localhost or `127.0.0.1` HTTP redirect contains the same `state` value.
-5. The redirect arrives in the same OAuth tab before `CONFIG.flowTtlMs` expires.
+1. L'utente avvia il login da TexWaller.
+2. TexWaller comunica all'estensione l'URL OAuth tramite `TEXWALLER_CHATGPT_OAUTH_START`.
+3. Il provider OAuth si apre in una nuova tab.
+4. Dopo il login, il provider redirige verso `localhost` o `127.0.0.1`.
+5. L'estensione verifica origine, tab e parametro OAuth `state`.
+6. Se il redirect è valido, invia l'URL completo a TexWaller con `TEXWALLER_CHATGPT_OAUTH_COMPLETE`.
+7. La tab del redirect viene chiusa e TexWaller torna in primo piano.
 
-This makes the OAuth `state` value the flow binding between your app, the authorization request, and the localhost redirect.
+L'estensione non scambia token, non salva credenziali e non usa la clipboard.
 
-## Configure
+## Sicurezza
 
-Edit `src/config.js`:
+L'estensione accetta un redirect solo se:
+
+1. il flusso è stato iniziato da una pagina TexWaller autorizzata;
+2. l'URL OAuth proviene da un'origine autorizzata;
+3. l'URL OAuth contiene un parametro `state`;
+4. il redirect locale contiene lo stesso `state`;
+5. il flusso non è scaduto.
+
+I flow in corso sono salvati temporaneamente in `storage.session` quando disponibile, con fallback su `storage.local`. I dati vecchi vengono ignorati dopo `flowTtlMs`.
+
+## Messaggi
+
+TexWaller può rilevare l'estensione con:
+
+```js
+window.postMessage({
+  source: "texwaller",
+  type: "TEXWALLER_CHATGPT_EXTENSION_PING",
+});
+```
+
+L'estensione risponde con:
+
+```js
+{
+  source: "texwaller-chatgpt-extension",
+  type: "TEXWALLER_CHATGPT_EXTENSION_PONG",
+  version: "<extension-version>"
+}
+```
+
+Prima di aprire il provider OAuth, TexWaller deve inviare:
+
+```js
+window.postMessage({
+  source: "texwaller",
+  type: "TEXWALLER_CHATGPT_OAUTH_START",
+  loginUrl,
+});
+```
+
+Quando il redirect locale è valido, TexWaller riceve:
+
+```js
+{
+  source: "texwaller-chatgpt-extension",
+  type: "TEXWALLER_CHATGPT_OAUTH_COMPLETE",
+  redirectUrl: "http://localhost:..."
+}
+```
+
+## Configurazione
+
+La configurazione principale è in `src/config.js`:
 
 ```js
 export const CONFIG = Object.freeze({
-  appOrigin: "http://localhost:5173",
+  appOrigins: ["https://texwaller.com", "https://www.texwaller.com", "http://localhost:5173"],
   authOrigins: ["https://auth.openai.com"],
   redirectHosts: ["localhost", "127.0.0.1"],
   flowTtlMs: 10 * 60 * 1000,
 });
 ```
 
-For localhost development, keep `host_permissions` broad enough for any local port:
+`appOrigins` deve contenere origini esatte, senza `/*`.
 
-```json
-"host_permissions": [
-  "http://localhost/*",
-  "https://auth.openai.com/*",
-  "http://127.0.0.1/*"
-]
-```
+## Compatibilità
 
-For production, narrow `host_permissions` to your exact production app and redirect hosts.
+Il codice usa `browser` quando disponibile e `chrome` come fallback, così non è legato a un singolo namespace.
 
-Do not put `/*` in `CONFIG.appOrigin`; it must be an exact origin such as `http://localhost:5173` or `https://app.example.com`.
+Il repository contiene manifest separati per evitare incompatibilità tra loader desktop:
 
-## App Requirements
+1. `manifest.json` per Chrome, Edge, Brave, Opera e altri browser Chromium moderni.
+2. `manifest.firefox.json` per Firefox 121 o superiore e come base per packaging Safari desktop.
 
-Your app should generate a cryptographically random OAuth `state`, include it in the OpenAI authorization URL, and verify it server-side or in your app after the copied redirect URL is pasted or submitted.
+Non usa `chrome.offscreen` né permessi clipboard, quindi il flusso è più semplice e più adatto a una futura distribuzione multi-browser.
 
-The extension is designed for a flow where your app opens the OAuth authorization URL in another tab, for example with `target="_blank"` or `window.open(...)`.
+Browser desktop previsti:
 
-## Install Locally
+1. Chrome, Edge, Brave, Opera e altri Chromium moderni.
+2. Firefox 121 o superiore.
+3. Safari desktop tramite conversione/pacchettizzazione Safari Web Extension.
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Click Load unpacked.
-4. Select this folder.
+Il manifest Chromium usa `background.service_worker`. Il manifest Firefox/Safari usa `background.scripts`, perché Firefox non supporta ancora i background service worker delle estensioni come Chrome.
 
-## Behavior
+## Installazione Locale
 
-After a valid matching localhost redirect is detected, the extension:
+Per Chrome/Edge/Chromium:
 
-1. Copies the full redirect URL to the clipboard.
-2. Closes the OAuth redirect tab.
+1. Apri la pagina delle estensioni del browser.
+2. Abilita la modalità sviluppatore.
+3. Seleziona Load unpacked o equivalente.
+4. Scegli questa cartella.
 
-## Notes
+Per Firefox:
 
-The clipboard write is performed from an offscreen extension document because MV3 service workers cannot directly use DOM clipboard APIs.
+1. Copia `manifest.firefox.json` come `manifest.json` in una cartella di build temporanea insieme a `src/` e `icons/`.
+2. Apri `about:debugging#/runtime/this-firefox`.
+3. Seleziona Carica componente aggiuntivo temporaneo.
+4. Scegli il `manifest.json` della cartella temporanea.
+
+Per Safari desktop, usa `manifest.firefox.json` come base della Safari Web Extension e completa conversione e firma tramite Xcode.
+
+## Test Manuali
+
+1. Verifica che TexWaller riceva `TEXWALLER_CHATGPT_EXTENSION_PONG` dopo il ping.
+2. Avvia il login e verifica che TexWaller invii `TEXWALLER_CHATGPT_OAUTH_START`.
+3. Completa OAuth e verifica che TexWaller riceva `TEXWALLER_CHATGPT_OAUTH_COMPLETE` con `code` e `state`.
+4. Verifica che la tab locale venga chiusa e che TexWaller torni in primo piano.

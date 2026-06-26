@@ -1,14 +1,44 @@
 import { CONFIG } from "./config.js";
 
 const STORAGE_KEY = "pendingOpenAiOAuthFlows";
+const OAUTH_START_TYPE = "TEXWALLER_CHATGPT_OAUTH_START";
+const OAUTH_COMPLETE_TYPE = "TEXWALLER_CHATGPT_OAUTH_COMPLETE";
+const extensionApi = globalThis.browser ?? globalThis.chrome;
+const flowStorage = extensionApi.storage.session ?? extensionApi.storage.local;
 
-chrome.webNavigation.onCommitted.addListener(async (details) => {
+extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== OAUTH_START_TYPE) {
+    return false;
+  }
+
+  handleOAuthStartMessage(message, sender)
+    .then(() => sendResponse({ ok: true }))
+    .catch((error) => {
+      debug("OAuth start message ignored", { error: error.message });
+      sendResponse({ ok: false, error: error.message });
+    });
+
+  return true;
+});
+
+extensionApi.webNavigation.onCommitted.addListener(async (details) => {
   if (!isTopLevel(details)) {
     return;
   }
 
   const authUrl = parseUrl(details.url);
   if (!authUrl || !isAllowedAuthUrl(authUrl)) {
+    return;
+  }
+
+  const pendingTexWallerFlow = await findFlowByState(getOAuthState(authUrl));
+  if (pendingTexWallerFlow?.initiatedByTexWaller) {
+    await rememberFlow({
+      authUrl,
+      authTabId: details.tabId,
+      appTabId: pendingTexWallerFlow.appTabId,
+      initiatedByTexWaller: true,
+    });
     return;
   }
 
@@ -31,10 +61,11 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
     authUrl,
     authTabId: details.tabId,
     appTabId: authTab.openerTabId,
+    initiatedByTexWaller: false,
   });
 });
 
-chrome.webNavigation.onCreatedNavigationTarget.addListener(async (details) => {
+extensionApi.webNavigation.onCreatedNavigationTarget.addListener(async (details) => {
   if (details.sourceTabId < 0 || details.sourceFrameId !== 0) {
     return;
   }
@@ -58,10 +89,11 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(async (details) => {
     authUrl: targetUrl,
     authTabId: details.tabId,
     appTabId: details.sourceTabId,
+    initiatedByTexWaller: false,
   });
 });
 
-chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+extensionApi.webNavigation.onBeforeNavigate.addListener(async (details) => {
   if (!isTopLevel(details)) {
     return;
   }
@@ -82,12 +114,13 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     return;
   }
 
-  await copyToClipboard(redirectUrl.href);
+  await sendRedirectToApp(flow.appTabId, redirectUrl.href);
   await removeFlow(flow.id);
   await closeTab(details.tabId);
+  await focusTab(flow.appTabId);
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
+extensionApi.tabs.onRemoved.addListener(async (tabId) => {
   await removeFlowsForTab(tabId);
 });
 
@@ -104,7 +137,7 @@ function parseUrl(value) {
 }
 
 function isAllowedAppUrl(url) {
-  return url?.origin === CONFIG.appOrigin;
+  return CONFIG.appOrigins.includes(url?.origin) || isLocalDevelopmentOrigin(url);
 }
 
 function isAllowedAuthUrl(url) {
@@ -119,104 +152,136 @@ function getOAuthState(url) {
   return url.searchParams.get("state") || url.hash.match(/[&#]state=([^&]+)/)?.[1] || "";
 }
 
-async function rememberFlow({ authUrl, authTabId, appTabId }) {
-  const flows = await readFlows();
+async function handleOAuthStartMessage(message, sender) {
+  const appUrl = parseUrl(sender.url);
+  if (!sender.tab?.id || !isAllowedAppUrl(appUrl) || message.source !== "texwaller") {
+    throw new Error("message sender is not an allowed TexWaller page");
+  }
+
+  const authUrl = parseUrl(message.loginUrl);
+  if (!authUrl || !isAllowedAuthUrl(authUrl)) {
+    throw new Error("loginUrl is not an allowed OpenAI OAuth URL");
+  }
+
+  await rememberFlow({
+    authUrl,
+    authTabId: null,
+    appTabId: sender.tab.id,
+    initiatedByTexWaller: true,
+  });
+}
+
+function isLocalDevelopmentOrigin(url) {
+  return ["http:", "https:"].includes(url?.protocol) && ["localhost", "127.0.0.1"].includes(url.hostname);
+}
+
+async function rememberFlow({ authUrl, authTabId, appTabId, initiatedByTexWaller }) {
   const state = getOAuthState(authUrl);
   const now = Date.now();
-  const nextFlows = flows
-    .filter((flow) => now - flow.createdAt <= CONFIG.flowTtlMs)
-    .filter((flow) => flow.state !== state)
-    .concat({
-      id: crypto.randomUUID(),
-      state,
-      authTabId,
-      appTabId,
-      createdAt: now,
-    });
+  const freshFlows = await readFreshFlows(now);
+  const existingFlow = freshFlows.find((flow) => flow.state === state);
+  const nextFlow = {
+    id: crypto.randomUUID(),
+    state,
+    authTabId: authTabId ?? existingFlow?.authTabId ?? null,
+    appTabId: existingFlow?.initiatedByTexWaller ? existingFlow.appTabId : appTabId,
+    initiatedByTexWaller: Boolean(initiatedByTexWaller || existingFlow?.initiatedByTexWaller),
+    createdAt: now,
+  };
+  const nextFlows = freshFlows.filter((flow) => flow.state !== state).concat(nextFlow);
 
-  await chrome.storage.session.set({ [STORAGE_KEY]: nextFlows });
+  await writeFlows(nextFlows);
   debug("OAuth flow remembered", {
     authOrigin: authUrl.origin,
-    authTabId,
-    appTabId,
+    authTabId: nextFlow.authTabId,
+    appTabId: nextFlow.appTabId,
+    initiatedByTexWaller: nextFlow.initiatedByTexWaller,
     state,
   });
 }
 
 async function findMatchingFlow(redirectUrl, tabId) {
   const state = getOAuthState(redirectUrl);
-  const now = Date.now();
-  const flows = await readFlows();
-  const freshFlows = flows.filter((flow) => now - flow.createdAt <= CONFIG.flowTtlMs);
+  const freshFlows = await readFreshFlows();
 
-  if (freshFlows.length !== flows.length) {
-    await chrome.storage.session.set({ [STORAGE_KEY]: freshFlows });
-  }
+  return freshFlows.find((flow) => {
+    const isSameTab = flow.authTabId === tabId;
+    const isPendingTexWallerTab = flow.initiatedByTexWaller && flow.authTabId === null;
+    return flow.state === state && (isSameTab || isPendingTexWallerTab);
+  }) || null;
+}
 
-  return freshFlows.find((flow) => flow.state === state && flow.authTabId === tabId) || null;
+async function findFlowByState(state) {
+  return (await readFreshFlows()).find((flow) => flow.state === state) || null;
 }
 
 async function removeFlow(flowId) {
   const flows = await readFlows();
-  await chrome.storage.session.set({
-    [STORAGE_KEY]: flows.filter((flow) => flow.id !== flowId),
-  });
+  await writeFlows(flows.filter((flow) => flow.id !== flowId));
 }
 
 async function removeFlowsForTab(tabId) {
   const flows = await readFlows();
   const nextFlows = flows.filter((flow) => flow.authTabId !== tabId && flow.appTabId !== tabId);
   if (nextFlows.length !== flows.length) {
-    await chrome.storage.session.set({ [STORAGE_KEY]: nextFlows });
+    await writeFlows(nextFlows);
   }
+}
+
+async function readFreshFlows(now = Date.now()) {
+  const flows = await readFlows();
+  const freshFlows = flows.filter((flow) => now - flow.createdAt <= CONFIG.flowTtlMs);
+
+  if (freshFlows.length !== flows.length) {
+    await writeFlows(freshFlows);
+  }
+
+  return freshFlows;
 }
 
 async function readFlows() {
-  const stored = await chrome.storage.session.get(STORAGE_KEY);
+  const stored = await flowStorage.get(STORAGE_KEY);
   return Array.isArray(stored[STORAGE_KEY]) ? stored[STORAGE_KEY] : [];
 }
 
-async function copyToClipboard(text) {
-  await ensureOffscreenDocument();
-  const response = await chrome.runtime.sendMessage({
-    type: "copy-to-clipboard",
-    text,
+async function writeFlows(flows) {
+  await flowStorage.set({ [STORAGE_KEY]: flows });
+}
+
+async function sendRedirectToApp(tabId, redirectUrl) {
+  const response = await extensionApi.tabs.sendMessage(tabId, {
+    type: OAUTH_COMPLETE_TYPE,
+    redirectUrl,
   });
 
   if (!response?.ok) {
-    throw new Error(response?.error || "Clipboard copy failed");
+    throw new Error(response?.error || "TexWaller did not accept the OAuth redirect URL");
   }
-}
-
-async function ensureOffscreenDocument() {
-  const offscreenUrl = chrome.runtime.getURL("src/offscreen.html");
-  const existingContexts = await chrome.runtime.getContexts({
-    contextTypes: ["OFFSCREEN_DOCUMENT"],
-    documentUrls: [offscreenUrl],
-  });
-
-  if (existingContexts.length > 0) {
-    return;
-  }
-
-  await chrome.offscreen.createDocument({
-    url: "src/offscreen.html",
-    reasons: ["CLIPBOARD"],
-    justification: "Copy the verified OAuth redirect URL to the clipboard.",
-  });
 }
 
 async function closeTab(tabId) {
   try {
-    await chrome.tabs.remove(tabId);
+    await extensionApi.tabs.remove(tabId);
   } catch {
     // The user may have already closed the tab.
   }
 }
 
+async function focusTab(tabId) {
+  const tab = await getTab(tabId);
+  if (!tab) {
+    return;
+  }
+
+  await extensionApi.tabs.update(tabId, { active: true });
+  if (tab.windowId !== undefined) {
+    await extensionApi.windows.update(tab.windowId, { focused: true });
+  }
+}
+
 async function getTab(tabId) {
   try {
-    return await chrome.tabs.get(tabId);
+    return await extensionApi.tabs.get(tabId);
   } catch {
     return null;
   }
