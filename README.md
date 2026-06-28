@@ -91,14 +91,14 @@ Il codice usa `browser` quando disponibile e `chrome` come fallback, così non �
 Il repository contiene manifest separati per evitare incompatibilità tra loader desktop:
 
 1. `manifest.json` per Chrome, Edge, Brave, Opera e altri browser Chromium moderni.
-2. `manifest.firefox.json` per Firefox 121 o superiore e come base per packaging Safari desktop.
+2. `manifest.firefox.json` per Firefox 142 o superiore e come base per packaging Safari desktop.
 
 Non usa `chrome.offscreen` né permessi clipboard, quindi il flusso è più semplice e più adatto a una futura distribuzione multi-browser.
 
 Browser desktop previsti:
 
 1. Chrome, Edge, Brave, Opera e altri Chromium moderni.
-2. Firefox 121 o superiore.
+2. Firefox 142 o superiore.
 3. Safari desktop tramite conversione/pacchettizzazione Safari Web Extension.
 
 Il manifest Chromium usa `background.service_worker`. Il manifest Firefox/Safari usa `background.scripts`, perché Firefox non supporta ancora i background service worker delle estensioni come Chrome.
@@ -120,6 +120,21 @@ Per Firefox:
 4. Scegli il `manifest.json` della cartella temporanea.
 
 Per Safari desktop, usa `manifest.firefox.json` come base della Safari Web Extension e completa conversione e firma tramite Xcode.
+
+## Packaging Release
+
+Genera i pacchetti puliti per gli store con:
+
+```bash
+scripts/package-release.sh
+```
+
+Lo script crea:
+
+1. `dist/texwaller-ai-connector-chrome-v<version>.zip` con il manifest Chromium.
+2. `dist/texwaller-ai-connector-firefox-v<version>.zip` con `manifest.firefox.json` copiato come `manifest.json`.
+
+Prima dell'invio agli store, verifica che la privacy policy pubblicata descriva gli stessi permessi e domini dichiarati nei manifest.
 
 ## Test Manuali
 
