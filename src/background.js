@@ -6,6 +6,16 @@ const OAUTH_COMPLETE_TYPE = "TEXWALLER_CHATGPT_OAUTH_COMPLETE";
 const extensionApi = globalThis.browser ?? globalThis.chrome;
 const flowStorage = extensionApi.storage.session ?? extensionApi.storage.local;
 
+scheduleContentScriptInjection();
+
+extensionApi.runtime.onInstalled.addListener(() => {
+  scheduleContentScriptInjection();
+});
+
+extensionApi.runtime.onStartup?.addListener(() => {
+  scheduleContentScriptInjection();
+});
+
 extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type !== OAUTH_START_TYPE) {
     return false;
@@ -168,6 +178,36 @@ async function handleOAuthStartMessage(message, sender) {
     authTabId: null,
     appTabId: sender.tab.id,
     initiatedByTexWaller: true,
+  });
+}
+
+async function injectContentScriptsIntoAppTabs() {
+  if (!extensionApi.scripting?.executeScript) {
+    return;
+  }
+
+  const tabs = await extensionApi.tabs.query({ url: CONFIG.appContentScriptMatches });
+  await Promise.all(tabs.map((tab) => injectContentScript(tab.id)));
+}
+
+async function injectContentScript(tabId) {
+  if (tabId === undefined) {
+    return;
+  }
+
+  try {
+    await extensionApi.scripting.executeScript({
+      target: { tabId },
+      files: ["src/content.js"],
+    });
+  } catch (error) {
+    debug("Content script injection skipped", { tabId, error: error.message });
+  }
+}
+
+function scheduleContentScriptInjection() {
+  injectContentScriptsIntoAppTabs().catch((error) => {
+    debug("Content script injection failed", { error: error.message });
   });
 }
 

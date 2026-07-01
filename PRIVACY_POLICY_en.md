@@ -1,6 +1,6 @@
 # Privacy Policy for TexWaller AI Connector
 
-Last updated: June 27, 2026
+Last updated: July 1, 2026
 
 This Privacy Policy describes how TexWaller handles user data in the "TexWaller AI Connector" browser extension for Chrome, Firefox, Safari, and compatible browsers.
 
@@ -54,6 +54,7 @@ The extension requests only the permissions strictly necessary for its function.
 The extension uses permissions such as:
 
 - `storage`, to store temporary OAuth flow state locally in the browser;
+- `scripting`, to make the TexWaller content script available in already-open TexWaller tabs after installation, update, or browser startup;
 - `tabs`, to identify, close, and focus the tabs involved in the OAuth flow;
 - `webNavigation`, to detect relevant OAuth navigation and redirect events;
 - host permissions for TexWaller pages, OpenAI authentication pages, and local redirect hosts required by the OAuth flow.
